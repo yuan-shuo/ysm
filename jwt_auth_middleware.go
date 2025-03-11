@@ -2,6 +2,7 @@ package ysm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -22,10 +23,10 @@ type JwtConfig struct {
 	RefreshExpire         int    // token刷新时间（秒）
 	RefreshTokenSecret    string // Rt密钥
 	Issuer                string // token签发者
-	// Secret             string // token加密密钥
 }
 
 // JwtAuthMiddleware 创建并返回 JWT 认证中间件
+// Header:nil; "new_access_token", newAccessToken;"refresh_at_fail", err.Error()
 func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string) rest.Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +53,16 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 				// claims, err = parseToken(tokenString, cfg.Secret)
 				claims, err = VaildateAccessToken(tokenString, cfg.AccessTokenSecret, redis)
 				if err != nil || claims == nil {
+					newAccessToken, refreshClaims, refreshErr := RefreshAccessToken(
+						r, cfg, cfg.AccessTokenSecret, redis,
+					)
+
+					if refreshErr != nil || refreshClaims == nil {
+						http.Error(w, "Valid At err:"+err.Error()+", Valid Rt err:"+refreshErr.Error(), http.StatusUnauthorized)
+						return
+					}
+					// 设置新生成的 access token 到响应头
+					w.Header().Set("new_access_token", newAccessToken)
 					http.Error(w, "invalid or overdue access token", http.StatusUnauthorized)
 					return
 				} else {
@@ -64,38 +75,55 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 						return
 					}
 				}
-			}
 
-			// 尝试使用 refresh token 更新 access token
-			refreshTokenString := r.Header.Get("Refresh-Token")
-			if refreshTokenString == "" {
-				http.Error(w, "access token is missing or invalid and refresh token is required for renewing access token", http.StatusUnauthorized)
+				newAccessToken, refreshClaims, err := RefreshAccessToken(
+					r, cfg, cfg.AccessTokenSecret, redis,
+				)
+
+				if err != nil || refreshClaims == nil {
+					w.Header().Set("refresh_at_fail", err.Error())
+					ctx := context.WithValue(r.Context(), userIdKey{}, claims.UserID)
+					next(w, r.WithContext(ctx))
+					return
+				}
+
+				// 设置新生成的 access token 到响应头
+				w.Header().Set("new_access_token", newAccessToken)
+
+				// 使用刷新后的用户信息更新上下文
+				ctx := context.WithValue(r.Context(), userIdKey{}, refreshClaims.UserID)
+				next(w, r.WithContext(ctx))
+			} else {
+				// 如果不存在 accessToken，则直接返回
+				http.Error(w, "no access token", http.StatusUnauthorized)
 				return
 			}
 
-			// 验证 refresh token
-			// refreshClaims, err := parseToken(refreshTokenString, cfg.Secret)
-			refreshClaims, err := ValidateRefreshToken(refreshTokenString, cfg.RefreshTokenSecret, redis)
-			if err != nil || refreshClaims == nil {
-				http.Error(w, "refresh token expired or invalid, please log in again", http.StatusUnauthorized)
-				return
-			}
-
-			// 生成新的 access token 并设置其有效期为 AccessExpire
-			newAccessToken, err := GenerateAccessToken(redis, refreshClaims.UserID, cfg)
-			if err != nil {
-				http.Error(w, "failed to generate new access token", http.StatusInternalServerError)
-				return
-			}
-
-			// 设置新生成的 access token 到响应头
-			w.Header().Set("New-Access-Token", newAccessToken)
-
-			// 使用刷新后的用户信息更新上下文
-			ctx := context.WithValue(r.Context(), userIdKey{}, refreshClaims.UserID)
-			next(w, r.WithContext(ctx))
 		}
 	}
+}
+
+func RefreshAccessToken(r *http.Request, cfg JwtConfig, secret string, redis *redis.Redis) (string, *Claims, error) {
+	// 尝试使用 refresh token 更新 access token
+	refreshTokenString := r.Header.Get("Refresh-Token")
+	if refreshTokenString == "" {
+		return "", nil, errors.New("access token is missing or invalid and refresh token is required for renewing access token")
+	}
+
+	// 验证 refresh token
+	// refreshClaims, err := parseToken(refreshTokenString, cfg.Secret)
+	refreshClaims, err := ValidateRefreshToken(refreshTokenString, cfg.RefreshTokenSecret, redis)
+	if err != nil || refreshClaims == nil {
+		return "", nil, fmt.Errorf("failed to validate refresh token: %v", err)
+	}
+
+	// 生成新的 access token 并设置其有效期为 AccessExpire
+	newAccessToken, err := GenerateAccessToken(redis, refreshClaims.UserID, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return newAccessToken, refreshClaims, nil
 }
 
 // Claims represents what we want to put in the token
@@ -206,5 +234,5 @@ func parseToken(tokenType string, tokenStr string, secret string, redis *redis.R
 		}
 	}
 
-	return nil, fmt.Errorf("invalid token")
+	return nil, fmt.Errorf("invalid %s", tokenType)
 }
