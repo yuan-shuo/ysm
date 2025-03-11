@@ -4,6 +4,12 @@
 
 使用双token（At + Rt）并可以配置多种参数
 
+先看at，secret校验通过+redis里有+时间还够：**过**
+
+secret校验通过+redis里有+时间不够：**过**，并且增加New-Access-Token响应头通知前端更新最新的access_token（满时间，新字符串）
+
+校验不过、redis里没有、Rt错误：**不过**
+
 ## 获取 / GET
 
 ```go
@@ -13,7 +19,7 @@ go get github.com/yuan-shuo/ysm@v1.0.0
 ## 功能函数 / Func
 
 ```go
-// 1. JwtAuthMiddleware: 先看at，有，校验过就过，校验不过就返回错误。at没有/时间不足看rt，有就增加New-Access-Token响应头通知前端更新最新的access_token（时间刷新，字符串也可能刷新）
+// 1. JwtAuthMiddleware: 完整校验中间件逻辑
 JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string) rest.Middleware
 
 // 2. GenerateAccessToken: 获取AccessToken并搭配Uid写入redis, jwtConfig包含其有效期
@@ -29,9 +35,10 @@ GenerateRefreshToken(redis *redis.Redis, userID int64, jwtConfig JwtConfig) (str
 // JwtConfig
 type JwtConfig struct {
 	AccessExpire          int    // token过期时间（秒）
+	AccessTokenSecret     string // At密钥
 	AccessRefreshDeadLine int    // token截止刷新时间（秒）
 	RefreshExpire         int    // token刷新时间（秒）
-	Secret                string // token加密密钥
+	RefreshTokenSecret    string // Rt密钥
 	Issuer                string // token签发者
 }
 ```
@@ -113,11 +120,12 @@ type NoJwtUrl struct {
 
 ```yaml
 jwtConfig:
-  Secret: "<jwt_secret_key>"
-  Issuer: "<service_name>"
+  AccessTokenSecret: "<access_token_secret_key>"
+  RefreshTokenSecret: "<refresh_token_secret_key>"
+  Issuer: "user-api"
   AccessExpire: 600 # AccessToken有效时间/s
   RefreshExpire: 6000 # RefreshToken有效时间/s
-  AccessRefreshDeadLine: 300 # 每当At低于此时间, 利用Rt刷新At
+  AccessRefreshDeadLine: 580 # 每当At低于此时间, 利用Rt刷新At
   
 noJwtUrl: # 无需JWT验证的url列表
   Urls:

@@ -17,10 +17,12 @@ type userIdKey struct{}
 
 type JwtConfig struct {
 	AccessExpire          int    // token过期时间（秒）
+	AccessTokenSecret     string // At密钥
 	AccessRefreshDeadLine int    // token截止刷新时间（秒）
 	RefreshExpire         int    // token刷新时间（秒）
-	Secret                string // token加密密钥
+	RefreshTokenSecret    string // Rt密钥
 	Issuer                string // token签发者
+	// Secret             string // token加密密钥
 }
 
 // JwtAuthMiddleware 创建并返回 JWT 认证中间件
@@ -47,7 +49,8 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 
 			// 如果存在 accessToken，尝试解析
 			if tokenString != "" {
-				claims, err = parseToken(tokenString, cfg.Secret)
+				// claims, err = parseToken(tokenString, cfg.Secret)
+				claims, err = VaildateAccessToken(tokenString, cfg.AccessTokenSecret, redis)
 				if err != nil || claims == nil {
 					http.Error(w, "invalid or overdue access token", http.StatusUnauthorized)
 					return
@@ -71,7 +74,8 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 			}
 
 			// 验证 refresh token
-			refreshClaims, err := parseToken(refreshTokenString, cfg.Secret)
+			// refreshClaims, err := parseToken(refreshTokenString, cfg.Secret)
+			refreshClaims, err := ValidateRefreshToken(refreshTokenString, cfg.RefreshTokenSecret, redis)
 			if err != nil || refreshClaims == nil {
 				http.Error(w, "refresh token expired or invalid, please log in again", http.StatusUnauthorized)
 				return
@@ -103,10 +107,13 @@ type Claims struct {
 // 获取token，若已存在则不再额外生成token
 func GetOrCreateToken(tokenType string, redis *redis.Redis, userID int64, jwtConfig JwtConfig) (string, error) {
 	var expire int
+	var secret string
 	if tokenType == "accessToken" {
 		expire = jwtConfig.AccessExpire
+		secret = jwtConfig.AccessTokenSecret
 	} else if tokenType == "refreshToken" {
 		expire = jwtConfig.RefreshExpire
+		secret = jwtConfig.RefreshTokenSecret
 	} else {
 		return "", fmt.Errorf("invalid token type")
 	}
@@ -133,7 +140,7 @@ func GetOrCreateToken(tokenType string, redis *redis.Redis, userID int64, jwtCon
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	newToken, err := token.SignedString([]byte(jwtConfig.Secret))
+	newToken, err := token.SignedString([]byte(secret))
 	if err != nil {
 		return "", fmt.Errorf("failed to generate %s: %v", tokenType, err)
 	}
@@ -163,7 +170,16 @@ func WriteTokenToRedis(redis *redis.Redis, key string, userID int64, token strin
 	return nil
 }
 
-func parseToken(tokenStr string, secret string) (*Claims, error) {
+func VaildateAccessToken(tokenStr string, secret string, redis *redis.Redis) (*Claims, error) {
+	return parseToken("accessToken", tokenStr, secret, redis)
+}
+
+func ValidateRefreshToken(tokenStr string, secret string, redis *redis.Redis) (*Claims, error) {
+	return parseToken("refreshToken", tokenStr, secret, redis)
+}
+
+func parseToken(tokenType string, tokenStr string, secret string, redis *redis.Redis) (*Claims, error) {
+	// 解析 token
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -175,8 +191,19 @@ func parseToken(tokenStr string, secret string) (*Claims, error) {
 		return nil, err
 	}
 
+	// 校验 token 合法性
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		return claims, nil
+		// 检查 token 是否在 Redis 中并且值是否匹配
+		storedToken, err := redis.GetCtx(context.Background(), fmt.Sprintf("%s:%d", tokenType, claims.UserID))
+		if err != nil {
+			return nil, fmt.Errorf("error checking token in redis: %v", err)
+		}
+		// 如果从key获取的token在redis中，则返回claims
+		if storedToken == tokenStr {
+			return claims, nil
+		} else {
+			return nil, fmt.Errorf("sent token does not match the token in redis")
+		}
 	}
 
 	return nil, fmt.Errorf("invalid token")
