@@ -1,14 +1,14 @@
 # jwt_auth_middleware
 
-自己写的依赖：[yuan-shuo/ysm: gozero custom middleware - gozero自定义中间件包](https://github.com/yuan-shuo/ysm?tab=Apache-2.0-1-ov-file)
-
-使用双token（At + Rt）并可以配置多种参数
-
 先看at，secret校验通过+redis里有+时间还够：**过**
 
-secret校验通过+redis里有+时间不够：**过**，并且增加New-Access-Token响应头通知前端更新最新的access_token（满时间，新字符串）
+secret校验通过+redis里有+时间不够+有校验合格的Rt：**过**，并且增加New-Access-Token响应头通知前端更新最新的access_token（满时间，新字符串）
 
-校验不过、redis里没有、Rt错误：**不过**
+secret校验通过+redis里有+时间不够+没有校验合格的Rt：**过**，并且增加New-Access-Token响应头通知前端更新最新的access_token（满时间，新字符串），增加refresh_at_fail响应头通知刷新错误导致的的error
+
+secret校验不通过/redis里没有+有校验合格的Rt：**不过**，但还是增加New-Access-Token响应头通知前端更新最新的access_token（满时间，新字符串）
+
+校验不过+redis里没有+Rt错误：**不过**，返回http错误同时包含At和Rt的error
 
 ## 获取 / GET
 
