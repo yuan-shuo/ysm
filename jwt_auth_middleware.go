@@ -21,6 +21,7 @@ type JwtConfig struct {
 	AccessTokenSecret     string // At密钥
 	AccessRefreshDeadLine int    // token截止刷新时间（秒）
 	RefreshExpire         int    // token刷新时间（秒）
+	RefreshTimeLimit      int    // token限制刷新时间间隔（秒）
 	RefreshTokenSecret    string // Rt密钥
 	Issuer                string // token签发者
 }
@@ -50,18 +51,19 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 
 			// 如果存在 accessToken，尝试解析
 			if tokenString != "" {
-				// claims, err = parseToken(tokenString, cfg.Secret)
+				// 校验accessToken
 				claims, err = VaildateAccessToken(tokenString, cfg.AccessTokenSecret, redis)
+				// 如果 accessToken 无效，尝使用 refreshToken 生成有效的 accessToken
 				if err != nil || claims == nil {
 					newAccessToken, refreshClaims, refreshErr := RefreshAccessToken(
-						r, cfg, cfg.AccessTokenSecret, redis,
+						r, cfg, tokenString, cfg.AccessTokenSecret, redis,
 					)
-
+					// 如果accessToken与refreshToken 均无效，则返回二者的错误信息
 					if refreshErr != nil || refreshClaims == nil {
 						http.Error(w, "Valid At err:"+err.Error()+", Valid Rt err:"+refreshErr.Error(), http.StatusUnauthorized)
 						return
 					}
-					// 设置新生成的 access token 到响应头
+					// accessToken 无效时, refreshToken 有效, 设置新生成的 access token 到响应头
 					w.Header().Set("new_access_token", newAccessToken)
 					http.Error(w, "invalid or overdue access token", http.StatusUnauthorized)
 					return
@@ -77,7 +79,7 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 				}
 
 				newAccessToken, refreshClaims, err := RefreshAccessToken(
-					r, cfg, cfg.AccessTokenSecret, redis,
+					r, cfg, tokenString, cfg.AccessTokenSecret, redis,
 				)
 
 				if err != nil || refreshClaims == nil {
@@ -103,7 +105,7 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 	}
 }
 
-func RefreshAccessToken(r *http.Request, cfg JwtConfig, secret string, redis *redis.Redis) (string, *Claims, error) {
+func RefreshAccessToken(r *http.Request, cfg JwtConfig, accessToken string, secret string, redis *redis.Redis) (string, *Claims, error) {
 	// 尝试使用 refresh token 更新 access token
 	refreshTokenString := r.Header.Get("Refresh-Token")
 	if refreshTokenString == "" {
@@ -111,10 +113,33 @@ func RefreshAccessToken(r *http.Request, cfg JwtConfig, secret string, redis *re
 	}
 
 	// 验证 refresh token
-	// refreshClaims, err := parseToken(refreshTokenString, cfg.Secret)
 	refreshClaims, err := ValidateRefreshToken(refreshTokenString, cfg.RefreshTokenSecret, redis)
 	if err != nil || refreshClaims == nil {
 		return "", nil, fmt.Errorf("failed to validate refresh token: %v", err)
+	}
+
+	// 删除旧的 access token
+	if exists, _ := redis.Exists(fmt.Sprintf("%s:%s", "accessToken", accessToken)); exists {
+		redis.Del(fmt.Sprintf("%s:%s", "accessToken", accessToken))
+	}
+
+	// 当配置了间隔时间大于0时，则设置时间限制刷新点, 此点存在期间内不再生成新的 access token
+	if cfg.RefreshTimeLimit > 0 {
+		// 设置时间限制刷新点, 此点存在期间内不再生成新的 access token
+		if exists, _ := redis.Exists("tokenRefreshTimeLimit:" + refreshTokenString); exists {
+			return "", nil, fmt.Errorf(
+				"please wait for %d seconds before refreshing the token again",
+				cfg.RefreshTimeLimit,
+			)
+		} else {
+			// 基于配置文件的时间限制(int)生成对应限制时间的限制点
+			if err := redis.Setex("tokenRefreshTimeLimit:"+refreshTokenString,
+				fmt.Sprintf("refresh token time limit by this data: %d (s)", cfg.RefreshTimeLimit),
+				cfg.RefreshTimeLimit,
+			); err != nil {
+				return "", nil, fmt.Errorf("can not set the refresh time limit: %v", err)
+			}
+		}
 	}
 
 	// 生成新的 access token 并设置其有效期为 AccessExpire
@@ -146,18 +171,6 @@ func GetOrCreateToken(tokenType string, redis *redis.Redis, userID int64, jwtCon
 		return "", fmt.Errorf("invalid token type")
 	}
 
-	// 构建用于查找已有 token 的 Redis 键名, 让refreshToken每人至多一个
-	if tokenType == "refreshToken" {
-		tokenKey := fmt.Sprintf("%s:%d", tokenType, userID)
-
-		// 尝试从 Redis 获取现有的 token
-		existingToken, err := redis.GetCtx(context.Background(), tokenKey)
-		if err == nil && existingToken != "" {
-			// 如果 Redis 中已有有效的 token，则直接返回
-			return existingToken, nil
-		}
-	}
-
 	// 生成新的 JWT token
 	claims := &Claims{
 		UserID: userID,
@@ -174,7 +187,7 @@ func GetOrCreateToken(tokenType string, redis *redis.Redis, userID int64, jwtCon
 	}
 
 	// 存储新的 token 到 Redis
-	if err := WriteTokenToRedis(redis, tokenType+":", userID, newToken, expire); err != nil {
+	if err := WriteTokenToRedis(redis, tokenType+":", newToken, userID, expire); err != nil {
 		return "", fmt.Errorf("failed to write %s to redis: %v", tokenType, err)
 	}
 
@@ -191,8 +204,8 @@ func GenerateRefreshToken(redis *redis.Redis, userID int64, jwtConfig JwtConfig)
 	return GetOrCreateToken("refreshToken", redis, userID, jwtConfig)
 }
 
-func WriteTokenToRedis(redis *redis.Redis, key string, userID int64, token string, duration int) error {
-	if err := redis.Setex(key+strconv.FormatInt(userID, 10), token, duration); err != nil {
+func WriteTokenToRedis(redis *redis.Redis, key string, token string, userID int64, duration int) error {
+	if err := redis.Setex(key+token, strconv.FormatInt(userID, 10), duration); err != nil {
 		return fmt.Errorf("failed to write token to redis: %v", err)
 	}
 	return nil
@@ -222,12 +235,12 @@ func parseToken(tokenType string, tokenStr string, secret string, redis *redis.R
 	// 校验 token 合法性
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
 		// 检查 token 是否在 Redis 中并且值是否匹配
-		storedToken, err := redis.GetCtx(context.Background(), fmt.Sprintf("%s:%d", tokenType, claims.UserID))
+		exists, err := redis.Exists(fmt.Sprintf("%s:%s", tokenType, tokenStr))
 		if err != nil {
 			return nil, fmt.Errorf("error checking token in redis: %v", err)
 		}
 		// 如果从key获取的token在redis中，则返回claims
-		if storedToken == tokenStr {
+		if exists {
 			return claims, nil
 		} else {
 			return nil, fmt.Errorf("sent token does not match the token in redis")

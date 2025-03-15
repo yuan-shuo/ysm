@@ -10,6 +10,8 @@ secret校验不通过/redis里没有+有校验合格的Rt：**不过**，但还�
 
 校验不过+redis里没有+Rt错误：**不过**，返回http错误同时包含At和Rt的error
 
+（RefreshToken每隔一段时间后才能刷新AccessToken，时间通过说明中的yaml配置，小于等于0则视为不考虑间隔刷新，不怕被海量新At堆满Redis可以幻想一下）
+
 ## 获取 / GET
 
 ```go
@@ -32,12 +34,12 @@ GenerateRefreshToken(redis *redis.Redis, userID int64, jwtConfig JwtConfig) (str
 其中的自定义类型：
 
 ```go
-// JwtConfig
 type JwtConfig struct {
 	AccessExpire          int    // token过期时间（秒）
 	AccessTokenSecret     string // At密钥
 	AccessRefreshDeadLine int    // token截止刷新时间（秒）
 	RefreshExpire         int    // token刷新时间（秒）
+	RefreshTimeLimit      int    // token限制刷新时间间隔（秒）
 	RefreshTokenSecret    string // Rt密钥
 	Issuer                string // token签发者
 }
@@ -120,12 +122,13 @@ type NoJwtUrl struct {
 
 ```yaml
 jwtConfig:
-  AccessTokenSecret: "<access_token_secret_key>"
-  RefreshTokenSecret: "<refresh_token_secret_key>"
+  AccessTokenSecret: "yuan_access_token"
+  RefreshTokenSecret: "yuan_refresh_token"
   Issuer: "user-api"
   AccessExpire: 600 # AccessToken有效时间/s
   RefreshExpire: 6000 # RefreshToken有效时间/s
-  AccessRefreshDeadLine: 580 # 每当At低于此时间, 利用Rt刷新At
+  RefreshTimeLimit: 20 # token限制刷新时间间隔/s
+  AccessRefreshDeadLine: 580 # 每当At低于此时间/s, 利用Rt刷新At
   
 noJwtUrl: # 无需JWT验证的url列表
   Urls:
