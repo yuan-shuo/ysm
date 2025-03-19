@@ -31,6 +31,8 @@ type JwtConfig struct {
 func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string) rest.Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Headers", "refresh-token")
+			w.Header().Set("Access-Control-Expose-Headers", "new_access_token")
 			// 检查当前路径是否在排除列表中
 			for _, path := range excludedPaths {
 				if r.URL.Path == path {
@@ -50,56 +52,56 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 			}
 
 			// 如果存在 accessToken，尝试解析
-			if tokenString != "" {
-				// 校验accessToken
-				claims, err = VaildateAccessToken(tokenString, cfg.AccessTokenSecret, redis)
-				// 如果 accessToken 无效，尝使用 refreshToken 生成有效的 accessToken
-				if err != nil || claims == nil {
-					newAccessToken, refreshClaims, refreshErr := RefreshAccessToken(
-						r, cfg, tokenString, cfg.AccessTokenSecret, redis,
-					)
-					// 如果accessToken与refreshToken 均无效，则返回二者的错误信息
-					if refreshErr != nil || refreshClaims == nil {
-						http.Error(w, "Valid At err:"+err.Error()+", Valid Rt err:"+refreshErr.Error(), http.StatusUnauthorized)
-						return
-					}
-					// accessToken 无效时, refreshToken 有效, 设置新生成的 access token 到响应头
-					w.Header().Set("new_access_token", newAccessToken)
-					http.Error(w, "invalid or overdue access token", http.StatusUnauthorized)
-					return
-				} else {
-					// 判断 accessToken 是否接近过期
-					now := time.Now().Unix()
-					if claims.ExpiresAt.Unix()-now >= int64(cfg.AccessRefreshDeadLine) {
-						// 如果 access token 还有足够的时间，则直接继续处理请求
-						ctx := context.WithValue(r.Context(), userIdKey{}, claims.UserID)
-						next(w, r.WithContext(ctx))
-						return
-					}
-				}
-
-				newAccessToken, refreshClaims, err := RefreshAccessToken(
+			// if tokenString != "" {
+			// 校验accessToken
+			claims, err = VaildateAccessToken(tokenString, cfg.AccessTokenSecret, redis)
+			// 如果 accessToken 无效，尝使用 refreshToken 生成有效的 accessToken
+			if err != nil || claims == nil {
+				newAccessToken, refreshClaims, refreshErr := RefreshAccessToken(
 					r, cfg, tokenString, cfg.AccessTokenSecret, redis,
 				)
-
-				if err != nil || refreshClaims == nil {
-					w.Header().Set("refresh_at_fail", err.Error())
+				// 如果accessToken与refreshToken 均无效，则返回二者的错误信息
+				if refreshErr != nil || refreshClaims == nil {
+					http.Error(w, "Valid At err:"+err.Error()+", Valid Rt err:"+refreshErr.Error(), http.StatusUnauthorized)
+					return
+				}
+				// accessToken 无效时, refreshToken 有效, 设置新生成的 access token 到响应头
+				w.Header().Set("new_access_token", newAccessToken)
+				http.Error(w, "invalid or overdue access token", http.StatusUnauthorized)
+				return
+			} else {
+				// 判断 accessToken 是否接近过期
+				now := time.Now().Unix()
+				if claims.ExpiresAt.Unix()-now >= int64(cfg.AccessRefreshDeadLine) {
+					// 如果 access token 还有足够的时间，则直接继续处理请求
 					ctx := context.WithValue(r.Context(), userIdKey{}, claims.UserID)
 					next(w, r.WithContext(ctx))
 					return
 				}
+			}
 
-				// 设置新生成的 access token 到响应头
-				w.Header().Set("new_access_token", newAccessToken)
+			newAccessToken, refreshClaims, err := RefreshAccessToken(
+				r, cfg, tokenString, cfg.AccessTokenSecret, redis,
+			)
 
-				// 使用刷新后的用户信息更新上下文
-				ctx := context.WithValue(r.Context(), userIdKey{}, refreshClaims.UserID)
+			if err != nil || refreshClaims == nil {
+				w.Header().Set("refresh_at_fail", err.Error())
+				ctx := context.WithValue(r.Context(), userIdKey{}, claims.UserID)
 				next(w, r.WithContext(ctx))
-			} else {
-				// 如果不存在 accessToken，则直接返回
-				http.Error(w, "no access token", http.StatusUnauthorized)
 				return
 			}
+
+			// 设置新生成的 access token 到响应头
+			w.Header().Set("new_access_token", newAccessToken)
+
+			// 使用刷新后的用户信息更新上下文
+			ctx := context.WithValue(r.Context(), userIdKey{}, refreshClaims.UserID)
+			next(w, r.WithContext(ctx))
+			// } else {
+			// 	// 如果不存在 accessToken，则直接返回
+			// 	http.Error(w, "no access token", http.StatusUnauthorized)
+			// 	return
+			// }
 
 		}
 	}
