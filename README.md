@@ -78,7 +78,13 @@ func main() {
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
 
-	server := rest.MustNewServer(c.RestConf)
+    server := rest.MustNewServer(c.RestConf,
+		// 设置允许跨域的域名
+		rest.WithCors("http://localhost:8080"),
+		rest.WithCors("http://192.168.43.49:8080/"),
+		rest.WithCorsHeaders("refresh-token"),
+	)
+    
 	defer server.Stop()
 
 	ctx := svc.NewServiceContext(c)
@@ -122,13 +128,13 @@ type NoJwtUrl struct {
 
 ```yaml
 jwtConfig:
-  AccessTokenSecret: "yuan_access_token"
-  RefreshTokenSecret: "yuan_refresh_token"
+  AccessTokenSecret: "access_token_key"
+  RefreshTokenSecret: "refresh_token_key"
   Issuer: "user-api"
   AccessExpire: 600 # AccessToken有效时间/s
   RefreshExpire: 6000 # RefreshToken有效时间/s
   RefreshTimeLimit: 20 # token限制刷新时间间隔/s
-  AccessRefreshDeadLine: 580 # 每当At低于此时间/s, 利用Rt刷新At
+  AccessRefreshDeadLine: 120 # 每当At低于此时间/s, 利用Rt刷新At
   
 noJwtUrl: # 无需JWT验证的url列表
   Urls:
