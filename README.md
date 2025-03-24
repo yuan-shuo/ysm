@@ -143,6 +143,16 @@ noJwtUrl: # 无需JWT验证的url列表
     - "/test/user"
 ```
 
+### 获取用户id
+
+```go
+// 获得用户uid
+uid, ok := l.ctx.Value(ysm.UserIdKey{}).(int64)
+if !ok {
+    return nil, errors.New("user ID not found in context")
+}
+```
+
 ### 内置函数调用
 
 示例
