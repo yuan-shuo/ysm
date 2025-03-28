@@ -14,7 +14,7 @@ import (
 	"github.com/zeromicro/go-zero/rest"
 )
 
-type userIdKey struct{}
+type UserIdKey struct{}
 
 type JwtConfig struct {
 	AccessExpire          int    // token过期时间（秒）
@@ -26,13 +26,21 @@ type JwtConfig struct {
 	Issuer                string // token签发者
 }
 
+type CorsConfig struct {
+	AllowedOrigins []string
+	AllowHeaders   []string
+	ExposeHeaders  []string
+}
+
 // JwtAuthMiddleware 创建并返回 JWT 认证中间件
 // Header:nil; "new_access_token", newAccessToken;"refresh_at_fail", err.Error()
 func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string) rest.Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Headers", "refresh-token")
-			w.Header().Set("Access-Control-Expose-Headers", "new_access_token")
+
+			// w.Header().Set("Access-Control-Allow-Headers", "refresh-token")
+			// w.Header().Set("Access-Control-Expose-Headers", "new_access_token")
+
 			// 检查当前路径是否在排除列表中
 			for _, path := range excludedPaths {
 				if r.URL.Path == path {
@@ -74,7 +82,7 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 				now := time.Now().Unix()
 				if claims.ExpiresAt.Unix()-now >= int64(cfg.AccessRefreshDeadLine) {
 					// 如果 access token 还有足够的时间，则直接继续处理请求
-					ctx := context.WithValue(r.Context(), userIdKey{}, claims.UserID)
+					ctx := context.WithValue(r.Context(), UserIdKey{}, claims.UserID)
 					next(w, r.WithContext(ctx))
 					return
 				}
@@ -86,7 +94,7 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 
 			if err != nil || refreshClaims == nil {
 				w.Header().Set("refresh_at_fail", err.Error())
-				ctx := context.WithValue(r.Context(), userIdKey{}, claims.UserID)
+				ctx := context.WithValue(r.Context(), UserIdKey{}, claims.UserID)
 				next(w, r.WithContext(ctx))
 				return
 			}
@@ -95,7 +103,7 @@ func JwtAuthMiddleware(cfg JwtConfig, redis *redis.Redis, excludedPaths []string
 			w.Header().Set("new_access_token", newAccessToken)
 
 			// 使用刷新后的用户信息更新上下文
-			ctx := context.WithValue(r.Context(), userIdKey{}, refreshClaims.UserID)
+			ctx := context.WithValue(r.Context(), UserIdKey{}, refreshClaims.UserID)
 			next(w, r.WithContext(ctx))
 			// } else {
 			// 	// 如果不存在 accessToken，则直接返回
